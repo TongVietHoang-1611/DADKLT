@@ -1,8 +1,8 @@
 import cv2
 import os
+import numpy as np
 from EasyROI import EasyROI
 from FeatureMatching_V2 import FeatureMatching
-import numpy as np
 
 def take_polygon_roi(data):
     result = {}
@@ -13,20 +13,10 @@ def take_polygon_roi(data):
     return result
 
 def get_image_paths(folder_path):
-    """Trả về danh sách đường dẫn tới các ảnh trong thư mục."""
     return [os.path.join(folder_path, file) for file in os.listdir(folder_path) if file.endswith(('.jpg', '.png', '.jpeg'))]
 
 def get_cropped_images(cropped_images_dict):
-    """Trả về dictionary chứa các ảnh đã cắt."""
     return {index: cropped_img for index, cropped_img in cropped_images_dict.items()}
-
-def get_polygon_coordinates(roi_dict):
-    """Lấy tọa độ các đỉnh của polygon ROI."""
-    polygons_coordinates = {}
-    for index, roi in roi_dict['roi'].items():
-        poly_vertices = [(int(vertex[0]), int(vertex[1])) for vertex in roi['vertices']]
-        polygons_coordinates[index] = poly_vertices
-    return polygons_coordinates
 
 def get_rect_roi(roi_dict):
     result = []
@@ -42,73 +32,66 @@ def get_rect_roi(roi_dict):
             [[br_x, br_y]],      # Góc dưới-phải
             [[br_x, tl_y]]       # Góc trên-phải
         ]
-
         result.append(four_points)
-
     return result
-
-def calculate_center(rectangle_points):
-    # Lấy tọa độ từ danh sách
-    x1, y1 = rectangle_points[0][0][0]
-    x2, y2 = rectangle_points[0][1][0]
-    x3, y3 = rectangle_points[0][2][0]
-    x4, y4 = rectangle_points[0][3][0]
-    
-    # Tính tọa độ trung tâm
-    center_x = (x1 + x3) / 2
-    center_y = (y1 + y3) / 2
-    
-    return (int(center_x), int(center_y))
-
-def calculate_center_pattern(rectangle_points):
-    # Lấy tọa độ từ danh sách mà không cần giải nén
-    x1, y1 = rectangle_points[0][0]
-    x2, y2 = rectangle_points[1][0]
-    x3, y3 = rectangle_points[2][0]
-    x4, y4 = rectangle_points[3][0]
-    
-    # Tính tọa độ trung tâm
-    center_x = (x1 + x3) / 2
-    center_y = (y1 + y3) / 2
-    
-    return (int(center_x), int(center_y))
-
-def calculate_change(center1, center2):
-    # Tính sự thay đổi giữa hai tâm
-    x1, y1 = center1
-    x2, y2 = center2
-    
-    delta_x = x2 - x1
-    delta_y = y2 - y1
-    
-    return delta_x, delta_y
 
 def convert_to_polygon_format(roi_dict):
     result = {'type': 'polygon', 'roi': {}}
-    
     for key, points in roi_dict.items():
-        # Tạo danh sách vertices với np.int32 và làm tròn giá trị
         vertices = [(np.int32(int(round(x))), np.int32(int(round(y)))) for x, y in points]
-        
-        # Cập nhật roi_dict với thông tin vertices
         result['roi'][key] = {'vertices': vertices}
-    
     return result
 
-def apply_change_to_polygon(original_polygon, delta_x, delta_y):
+def get_affine_transform(src_points, dst_points):
+    """
+    Tính ma trận biến đổi affine từ các điểm nguồn đến các điểm đích
+    """
+    src_points = np.float32([point[0] for point in src_points[:3]])
+    dst_points = np.float32([point[0] for point in dst_points[:3]])
+    return cv2.getAffineTransform(src_points, dst_points)
+
+def apply_affine_transform_to_polygon(polygon_points, affine_matrix):
+    """
+    Áp dụng phép biến đổi affine lên các điểm của polygon
+    """
+    transformed_points = []
+    for point in polygon_points:
+        x, y = point
+        # Chuyển đổi điểm thành ma trận homogeneous
+        point_matrix = np.array([x, y, 1])
+        # Áp dụng phép biến đổi
+        transformed_point = np.dot(affine_matrix, point_matrix)
+        transformed_points.append((int(transformed_point[0]), int(transformed_point[1])))
+    return transformed_points
+
+def transform_polygon_roi(original_polygon, init_rectangle, new_rectangle):
+    """
+    Biến đổi polygon dựa trên sự thay đổi của rectangle
+    """
+    # Tính ma trận biến đổi affine
+    affine_matrix = get_affine_transform(init_rectangle, new_rectangle)
+    
     new_roi_dict = {}
-    # Tạo bản sao của polygon gốc để tránh thay đổi giá trị gốc
     for key, polygon_points in original_polygon.items():
-        new_polygon = []
-        for point in polygon_points:
-            x, y = point
-            # Cộng sự thay đổi vào tọa độ
-            new_x = x + delta_x
-            new_y = y + delta_y
-            new_polygon.append((new_x, new_y))
-        new_roi_dict[key] = new_polygon
+        # Áp dụng biến đổi affine lên từng điểm của polygon
+        transformed_points = apply_affine_transform_to_polygon(polygon_points, affine_matrix)
+        new_roi_dict[key] = transformed_points
     
     return convert_to_polygon_format(new_roi_dict)
+
+def visualize_transformation(img, rectangle_points, polygon_roi, title="Transformation"):
+    """
+    Hiển thị kết quả transformation
+    """
+    # Vẽ rectangle
+    img_with_rect = cv2.polylines(img.copy(), [rectangle_points], True, (0, 255, 0), 2)
+    
+    # Vẽ polygon
+    for key, roi in polygon_roi['roi'].items():
+        vertices = np.array(roi['vertices'], np.int32)
+        img_with_rect = cv2.polylines(img_with_rect, [vertices], True, (0, 0, 255), 2)
+    
+    return img_with_rect
 
 if __name__ == '__main__':
     # Định nghĩa đường dẫn
@@ -129,9 +112,8 @@ if __name__ == '__main__':
     # Xử lý ảnh và lấy các thông tin ban đầu
     cropped_image_rectangle = roi_helper.crop_roi(frame, rectangle_roi)
     cropped_images = get_cropped_images(cropped_image_rectangle)
-    init_cordinate = get_rect_roi(rectangle_roi)
+    init_rectangle = get_rect_roi(rectangle_roi)[0]  # Lấy rectangle đầu tiên
     init_polygon = take_polygon_roi(polygon_roi)
-    init_center = calculate_center(init_cordinate)
     
     # Xử lý từng ảnh trong thư mục
     current_index = 0
@@ -145,27 +127,21 @@ if __name__ == '__main__':
             feature_matching = FeatureMatching(cropped_img, image_path_test)          
             new_rectangle_roi = np.int32(feature_matching.run())
             
-            # Tính toán sự thay đổi vị trí
-            new_center = calculate_center_pattern(new_rectangle_roi)
-            center_change = calculate_change(init_center, new_center)
-            
-            # Áp dụng sự thay đổi lên polygon ban đầu
-            new_polygon_roi = apply_change_to_polygon(init_polygon, center_change[0], center_change[1])
+            # Áp dụng biến đổi affine để cập nhật polygon
+            new_polygon_roi = transform_polygon_roi(init_polygon, init_rectangle, new_rectangle_roi)
             
             # Hiển thị kết quả
-            img_display = cv2.imread(image_path_test)
-            img_with_polygon = cv2.polylines(img_display, [new_rectangle_roi], True, (0, 255, 0), 3, cv2.LINE_AA)
-            frame_final = roi_helper.visualize_roi(img_with_polygon, new_polygon_roi)
+            frame_final = visualize_transformation(frame_test, new_rectangle_roi, new_polygon_roi)
             cv2.imshow("Matched Region", frame_final)
 
         # Xử lý phím nhấn
         key = cv2.waitKey(0) & 0xFF
-        if key == ord('c'):  # Nhấn 'c' để chuyển sang ảnh tiếp theo
+        if key == ord('c'):
             current_index += 1
             if current_index >= len(image_paths):
                 print("Đã tới ảnh cuối cùng.")
                 break
-        elif key == ord('q'):  # Nhấn 'q' để thoát
+        elif key == ord('q'):
             break
 
     cv2.destroyAllWindows()
